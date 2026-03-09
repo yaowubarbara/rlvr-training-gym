@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.env
+*.safetensors
+checkpoints_*/
+final_model_*/
+*.log
+nohup.out
