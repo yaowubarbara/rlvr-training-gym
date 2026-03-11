@@ -1,0 +1,775 @@
+\documentclass[11pt]{article}
+
+% === Packages ===
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{natbib}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+% === Title ===
+\title{Naive Stepwise Partial Rewards Induce Early-Stop Collapse\\in GRPO Training of Sequential API Agents}
+
+\author{
+  [Author Name]\\
+  [Affiliation]\\
+  \texttt{[email]}
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\begin{abstract}
+We study reward design for GRPO training of sequential API agents.
+Using a verifiable order management gym with deterministic state transitions, we train Qwen2.5-0.5B-Instruct across seven reward variants and evaluate with multi-seed protocols (up to 900 tasks per model).
+Our main finding is a negative result: naive stepwise partial reward---which grants per-step credit based on format compliance without API verification---achieves only $11.0\% \pm 1.0\%$ overall success, compared with $73.6\% \pm 1.0\%$ for an outcome-dominant reward that conditions the maximum signal on verified task completion.
+The naive partial model exhibits early-stop collapse: on hard tasks (4--5 steps), it stops after $\sim$1 step in 100\% of trials across all seeds, collecting partial credit rather than attempting completion.
+Note that this comparison simultaneously changes two variables---reward verification and reward structure---so the result should be understood as evidence against \emph{naive unverified stepwise} partial reward specifically, not against all forms of dense or intermediate reward.
+We additionally find that initializing from an outcome-dominant checkpoint reduces sensitivity to reward type in subsequent training, with continuation models converging to $\sim$82\% regardless of reward signal.
+All experiments run on a single consumer laptop GPU (RTX~5060, 8\,GB VRAM).
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+Reinforcement Learning from Verifiable Rewards (RLVR) has emerged as a powerful paradigm for training large language models, with systems like DeepSeek-R1 \citep{deepseek2025r1} demonstrating that binary correctness signals alone can induce sophisticated reasoning behaviors.
+However, nearly all RLVR research focuses on mathematical \citep{shao2024deepseekmath,hendrycks2021math,cobbe2021gsm8k} and coding tasks with single-turn verification.
+Real-world deployment increasingly requires \emph{agents} that execute multi-step workflows---calling APIs, managing state transitions, and coordinating across entities \citep{yao2024taubench,agentr1,agentrl2025}---where the gap between ``partial progress'' and ``task completion'' is both natural and tempting to exploit as a training signal \citep{casper2023rewardhacking}.
+
+The intuition is compelling: if a task requires five sequential API calls, surely rewarding a model that completes three steps should provide more training signal than a binary pass/fail.
+Step-level feedback should help with credit assignment, reduce reward sparsity, and guide the policy toward correct behavior.
+This intuition has driven process reward models \citep{lightman2023lets,wang2024mathshepherd}, stepwise verification \citep{uesato2022solving}, and turn-level reward design for multi-turn RL \citep{zeng2025turnlevel}.
+
+We test this intuition in a controlled setting and find that \emph{naive} stepwise partial credit---based on format compliance without API verification---can be severely counterproductive, consistent with findings in mathematical reasoning \citep{gao2024designing} but, to our knowledge, not previously documented for sequential API agent tasks.
+
+\paragraph{Research Question.}
+In deterministic API workflows with strict order dependencies, does naive stepwise partial credit improve GRPO training, or does outcome-dominant reward suffice?
+
+\paragraph{Setup.}
+We build a \emph{Zendesk-style training gym}: a verifiable order management API with deterministic state machine transitions, a parametric task generator spanning three difficulty levels (1--5 steps), and an automatic verifier that checks final order states.
+We train Qwen2.5-0.5B-Instruct \citep{qwen2025qwen25} with TRL's GRPOTrainer \citep{trl2024}, building on the GRPO algorithm introduced for DeepSeek \citep{deepseek2025r1}, across seven variants: format-only baseline, outcome-dominant reward, outcome-dominant with Boltzmann curriculum, naive step-level partial credit, stepwise execution with partial credit, supervised fine-tuning, and a verifiable milestone hybrid.
+All models are evaluated with a unified 30-task protocol across three random seeds.
+
+\paragraph{Findings.}
+On expanded evaluation (100 tasks per difficulty, 3 seeds = 900 tasks per model), outcome-dominant reward achieves $73.6\% \pm 1.0\%$ overall versus $11.0\% \pm 1.0\%$ for naive stepwise partial.
+On hard tasks (4--5 steps), the gap is absolute: $31.3\%$ vs. $0.0\%$.
+The partial-reward model exhibits early-stop collapse \citep{skalse2022misspecification}: a 100\% early-stop failure rate on hard tasks across all three seeds, completing an average of 1.07 out of 4.3 required steps before stopping.
+Note that this comparison confounds two changes---reward verification and reward structure (Section~\ref{sec:head2head})---so we interpret this as a negative result about naive unverified stepwise partial reward, not a general claim against dense rewards.
+Continuation training from an outcome-dominant checkpoint converges to $\sim$82\% regardless of reward type, suggesting that strong initialization reduces sensitivity to reward signal.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=*,itemsep=1pt]
+  \item A \textbf{verifiable API workflow gym} for RLVR agent training: a deterministic order management state machine with parametric task generation, automatic verification, and three difficulty levels.
+  \item An \textbf{early-stop collapse finding}: in our setting, naive stepwise partial reward induces a stereotyped policy that stops after $\sim$1 step on multi-step tasks, with 100\% reproducibility across seeds. We introduce a failure taxonomy (Type~A suboptimal convergence vs. Type~B reward-induced stopping) to characterize this.
+  \item An \textbf{initialization effect}: models initialized from outcome-dominant checkpoints are substantially less sensitive to reward type during continuation training.
+\end{enumerate}
+
+% ============================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{RLVR and GRPO.}
+DeepSeek-R1 \citep{deepseek2025r1} demonstrated that RLVR with binary rewards can train reasoning capabilities without supervised data.
+\citet{mroueh2025grpo} provided theoretical analysis of GRPO under binary rewards, while \citet{wen2025rlvr} showed RLVR incentivizes correct reasoning chains and \citet{yue2025rlvr} questioned whether RLVR's impact persists beyond training distribution.
+\citet{huang2026dynamics} developed a theory of RLVR training dynamics showing that smooth difficulty spectra produce a ``relay effect'' enabling steady improvement, while abrupt difficulty discontinuities cause grokking-type plateaus.
+\citet{liu2025drgrpo} identified an optimization bias in GRPO that artificially inflates response length for incorrect outputs, proposing Dr. GRPO as an unbiased fix.
+DAPO \citep{yu2025dapo} documented entropy collapse in large-scale GRPO training and introduced decoupled clipping and dynamic sampling as mitigations.
+For a comprehensive survey of reward mechanisms and their failure modes in RL-based reasoning, see \citet{pan2026survey}.
+
+\paragraph{Process vs. Outcome Rewards.}
+\citet{gao2024designing} showed that process rewards can \emph{hurt} RL training when combined with success rewards in PPO \citep{schulman2017ppo}.
+\citet{sullivan2025grpoprm} proved that GRPO implicitly functions as a process reward model, suggesting that explicit step-level signals may double-count credit assignment.
+PRIME \citep{cui2025prime} demonstrated implicit process rewards from outcome labels. UltraLogic \citep{ultralogic2025} introduced bipolar graded float rewards (positive for correct, negative for incorrect reasoning) and reported gains over standard 0/1 binary---a finding that supports richer reward signals when properly structured, contrasting with our negative result for naive unverified stepwise credit.
+MO-GRPO \citep{mogrpo2025} identified multi-objective reward hacking where GRPO optimizes the highest-variance reward component.
+\citet{chen2026milestones} replaced sparse outcome signals with dense sub-goal verifiable rewards for geometric reasoning, achieving strong gains---but crucially, each sub-goal remains individually verifiable, unlike naive stepwise partial credit.
+
+\paragraph{Reward Design for Agent RL and Tool-Use.}
+Recent work has shown that reward design is central to RL for long-horizon language agents and tool-use systems, but the emerging consensus is nuanced rather than binary.
+ToolRL \citep{toolrl2025} studies reward design for tool-using language agents and shows that reward type, scale, granularity, and temporal dynamics all matter for stable learning.
+CM2 \citep{cm2_2025} further argues that naively densifying rewards in multi-turn, multi-step agentic tool use can amplify noise and destabilize optimization, motivating checklist-style structured credit assignment instead.
+In adjacent settings, LongRLVR \citep{zhang2025longrlvr} introduces verifiable context rewards for long-context RL, ADMIRE \citep{admire2025} proposes adaptive milestone rewards for GUI agents, and Search-P1 \citep{searchp1} uses path-centric reward shaping for agentic retrieval.
+SETA \citep{li2025seta} uses independent unit test pass ratio with a completion bonus for software engineering agents---their tests are independently verifiable (unlike our sequential steps), making early stopping non-exploitable.
+\citet{seta2026} uses unit test pass ratio as dense reward for terminal agents trained with GRPO, explicitly rejecting binary 0/1 as ``too sparse for calculating advantage,'' while Endless Terminals \citep{gandhi2026endless} achieves strong gains with purely binary episode-level rewards by scaling environment diversity to 3,255 tasks---supporting our finding that binary rewards can suffice when environments are sufficiently diverse.
+WebAgent-R1 \citep{wei2025webagent} extends GRPO to multi-turn web agent training with binary rewards, boosting Qwen-2.5-3B from 6.1\% to 33.9\% on WebArena-Lite.
+Planner-R1 \citep{zhu2025planner} finds that smaller models are highly responsive to dense reward shaping in agentic RL, achieving 56.9\% pass rate on TravelPlanner with only 180 training queries.
+\citet{su2025prs} proposes Progressive Reward Shaping (PRS), a curriculum-inspired dense stage-wise reward, and VSPO, an enhanced GRPO variant that replaces zero-advantage samples.
+iStar \citep{liu2025istar} introduces implicit step rewards via a trajectory-based DPO objective, noting that explicit process supervision in agent RL suffers from biased annotation and reward hacking.
+Agent-R1 \citep{agentr1}, AgentRL \citep{agentrl2025}, $\tau$-bench \citep{yao2024taubench}, and WebRL \citep{qi2024webrl} further study multi-turn agent RL and evaluation.
+Taken together, these works suggest that dense intermediate feedback \emph{can} help, but only when it is structured, verifiable, and aligned with final task completion---rather than provided as free-form stepwise partial credit.
+The emerging landscape reveals a striking divergence: \citet{seta2026} and \citet{zhu2025planner} favor dense rewards, while \citet{gandhi2026endless}, \citet{wei2025webagent}, and our work find binary rewards sufficient or superior---suggesting that the optimal reward granularity depends critically on task structure and step independence.
+
+\paragraph{Positioning.}
+Our work focuses on a narrower but practically important setting: deterministic, sequential API workflows with strict order dependencies and verifiable end states.
+Unlike prior work that studies reward design broadly for tool use or introduces structured dense rewards, we isolate a specific failure mode of naive stepwise partial reward under training from scratch: \emph{early-stop collapse}.
+In our benchmark, the model trained with naive partial credit collapses to trajectories that terminate after roughly one step on hard tasks, yielding 0\% D2/D3 success and 100\% Type~B early-stop failures on D3, while an outcome-dominant reward remains stable.
+We further show that this vulnerability is strongly initialization-dependent: continuation from a strong checkpoint substantially reduces reward sensitivity.
+To our knowledge, this combination of findings---early-stop collapse in deterministic sequential API workflows, quantified through failure taxonomy and average completed steps, together with a from-scratch vs. continuation contrast---has not been directly documented in prior work.
+
+
+% ============================================================
+\section{The Zendesk Training Gym}
+\label{sec:gym}
+
+We construct a verifiable training environment for API agent tasks, inspired by real customer service workflows such as those modeled by $\tau$-bench \citep{yao2024taubench}. Our gym consists of three components: an API system with deterministic state transitions, a parametric task generator, and an automatic verifier.
+
+\subsection{API System}
+
+The core is an order management REST API implementing a finite state machine:
+\begin{center}
+\texttt{created} $\to$ \texttt{paid} $\to$ \texttt{shipped} $\to$ \texttt{delivered} $\to$ \texttt{refunded}\\[2pt]
+\texttt{created} $\to$ \texttt{cancelled}
+\end{center}
+
+Each transition requires specific parameters (e.g., payment method, carrier, tracking number) and is enforced deterministically---invalid transitions return structured error responses.
+The API is implemented with FastAPI and deployed on localhost during training, ensuring zero network latency and full reproducibility.
+
+\subsection{Task Generator}
+
+Tasks span three difficulty levels with nine task types:
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+  \item \textbf{D1 (Easy, 1--2 steps):} \texttt{create\_order}, \texttt{create\_and\_check}, \texttt{create\_and\_cancel}
+  \item \textbf{D2 (Medium, 2--3 steps):} \texttt{create\_and\_pay}, \texttt{create\_pay\_ship}, \texttt{pay\_and\_refund}
+  \item \textbf{D3 (Hard, 4--5 steps):} \texttt{full\_delivery}, \texttt{multi\_order}, \texttt{full\_lifecycle\_with\_refund}
+\end{itemize}
+
+Parameters (customer names, products, prices, carriers) are randomized per task.
+Tasks are generated procedurally rather than drawn from a fixed pool: training and evaluation instances are sampled independently from the generator using separate random draws, so the evaluation set contains no exact duplicate of any training instance.
+The train and evaluation distributions share the same task schema and API semantics but differ at the level of instantiated parameters.
+The \texttt{multi\_order} type requires managing two parallel orders with different lifecycle targets, testing entity tracking capability.
+
+\subsection{Verifier}
+
+The verifier: (1)~parses the model's output for structured \texttt{ACTION}/\texttt{BODY} pairs; (2)~executes parsed actions against the live API; (3)~checks that the final order state matches the task specification.
+It returns both a binary success signal and a partial reward $r_{\text{partial}} = k / T$, where $k$ is the number of completed steps and $T$ is the total required, enabling comparison between reward types using the same underlying evaluation.
+
+\subsection{Boltzmann Curriculum}
+\label{sec:curriculum}
+
+For variant v2b, we implement adaptive difficulty sampling.
+At each training step, difficulty $d$ is sampled with probability proportional to $\exp(-\text{perf}_d / \tau)$, where $\text{perf}_d$ is the running success rate for difficulty $d$ and temperature $\tau$ anneals from 2.0 to 0.3 over training, progressively focusing on the hardest tasks.
+
+
+% ============================================================
+\section{Experimental Setup}
+\label{sec:setup}
+
+\subsection{Model and Training}
+
+We use Qwen2.5-0.5B-Instruct \citep{qwen2025qwen25} as the base model, selected for its chat-format pre-training and feasibility on consumer hardware.
+Training uses TRL's GRPOTrainer \citep{trl2024}, which implements the GRPO algorithm \citep{shao2024deepseekmath,deepseek2025r1}, with: bfloat16 precision, gradient checkpointing, batch size 1 with gradient accumulation over 4 steps, 100 tasks per epoch, 3 epochs, 4 generations per prompt, and KL coefficient $\beta = 0.04$.
+All training runs are conducted on a single NVIDIA RTX~5060 Laptop GPU with 8\,GB VRAM, with most variants completing in 60--90 minutes and v5 (milestone hybrid) requiring approximately 3 hours due to its additional verification overhead.
+
+\subsection{Training Variants}
+
+Table~\ref{tab:variants} describes our seven training variants.
+The key comparison is between variants trained \emph{from scratch} (from the base Qwen2.5 checkpoint) and \emph{continuation} variants (initialized from a previously trained model).
+
+\begin{table}[t]
+\centering
+\caption{Training variants. ``Scratch'' = trained from Qwen2.5-0.5B-Instruct; ``Cont.'' = continuation from an outcome-dominant-trained checkpoint.}
+\label{tab:variants}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Variant} & \textbf{Reward} & \textbf{Init} & \textbf{Key Design} \\
+\midrule
+v1   & format only          & Scratch & Baseline GRPO \\
+v2a  & format + outcome-dominant & Scratch & Success$\to$1.0, fail$\to$partial \\
+v2b  & format + outcome-dom. + curric. & Cont. (v2a) & + Boltzmann curriculum \\
+v2c  & format + naive step partial & Scratch & Per-step format credit \\
+v3a  & SFT                  & Scratch & Supervised fine-tuning \\
+v4   & format + stepwise partial & Cont. (v2b) & Step-by-step + partial \\
+v5   & format + milestone hybrid & Scratch & $0.7 r_{\text{bin}} + 0.3 (m/M)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \textbf{outcome-dominant reward} (v2a) is a hybrid: it returns 1.0 on success (final state matches specification) and $r_{\text{partial}} = k/T$ on failure (where $k$ is completed steps and $T$ is total required).
+This is \emph{not} pure binary---a model completing 4/5 steps but failing final verification receives $r = 0.80$, not $0.0$.
+The key property is \emph{outcome dominance}: the gap between ``almost done'' ($\sim$0.80) and ``done'' (1.0) is $\sim$0.20, which still incentivizes full completion.
+The \textbf{naive stepwise partial reward} (v2c) returns per-step format credit without API verification: each step that follows the \texttt{ACTION}/\texttt{BODY} format receives equal credit regardless of whether it causes a correct state transition.
+Both variants also include a format reward (0.0--1.0) that checks the overall output structure.
+
+\subsection{Evaluation Protocol}
+
+Each model is evaluated on 30 tasks (10 per difficulty level) using a unified evaluation script with deterministic task generation per seed.
+All evaluation tasks are newly sampled instances not reused from training.
+We report results across three random seeds (42, 123, 777) for the four key variants (v2a, v2b, v2c, v4), yielding 12 total evaluations.
+Variants v1 and v3a use single-seed evaluation as reference baselines.
+
+\paragraph{Failure Taxonomy.}
+We classify each failure into two primary categories aligned with the reward hacking literature \citep{casper2023rewardhacking,singhal2023rewardhacking}:
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+  \item \textbf{Type~A} (``high partial, low final''): The model generates actions for most or all required steps ($r_{\text{partial}} \geq 0.75$) but fails final state verification. This indicates suboptimal policy convergence---the model \emph{tries} but makes parameter errors.
+  \item \textbf{Type~B} (``early stop''): The model generates fewer actions than required. This indicates reward-hacking-induced early stopping---the model \emph{chooses not to try}, collecting partial credit instead.
+\end{itemize}
+
+
+% ============================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Main Results}
+
+Figure~\ref{fig:overall} and Table~\ref{tab:main} present multi-seed results for our four primary variants, alongside single-seed results for reference baselines.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{fig1_overall.pdf}
+\caption{Overall success across training variants (30-task eval, 3 seeds). Reward effectiveness is non-monotonic: neither naive stepwise partial credit (v2c) nor a simple verifiable-milestone hybrid (v5) matches the balance achieved by the outcome-dominant variant (v2a), suggesting the key issue is reward balance and executability rather than reward density per se. Error bars show $\pm$1 std across 3 seeds.}
+\label{fig:overall}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Main results. Multi-seed variants report mean $\pm$ std across 3 seeds. D1/D2/D3 = easy/medium/hard difficulty. $^\dagger$Single-seed only.}
+\label{tab:main}
+\small
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+\textbf{Variant} & \textbf{Reward} & \textbf{Init} & \textbf{D1} & \textbf{D2} & \textbf{D3} & \textbf{Overall} \\
+\midrule
+v1$^\dagger$ & format only & Scratch & 100 & 90 & 0 & 63 \\
+v3a$^\dagger$ & SFT & Scratch & 100 & 40 & 0 & 46 \\
+\midrule
+\textbf{v2a} & \textbf{outcome-dom.} & \textbf{Scratch} & $90{\pm}8$ & $100{\pm}0$ & $\mathbf{47{\pm}5}$ & $\mathbf{79{\pm}3}$ \\
+v2c & naive partial & Scratch & $43{\pm}9$ & $0{\pm}0$ & $0{\pm}0$ & $14{\pm}3$ \\
+v5 & milestone hybrid & Scratch & $0{\pm}0$ & $0{\pm}0$ & $0{\pm}0$ & $0{\pm}0$ \\
+\midrule
+v2b & outcome-dom. + curric. & Cont. & $97{\pm}5$ & $100{\pm}0$ & $30{\pm}8$ & $76{\pm}4$ \\
+v4 & stepwise partial & Cont. & $100{\pm}0$ & $100{\pm}0$ & $47{\pm}5$ & $82{\pm}2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{From-Scratch: Outcome-Dominant $\gg$ Naive Partial.}
+Figure~\ref{fig:overall} compares all training variants under the 30-task evaluation protocol (10 tasks per difficulty, 3 seeds; see Section~\ref{sec:setup}).
+Figure~\ref{fig:overall} shows a non-monotonic pattern rather than a simple ordering by ``reward sophistication'': both naive stepwise partial reward (v2c, $14.4\%$) and a simple verifiable-milestone hybrid (v5, $0.0\%$) underperform the outcome-dominant variant (v2a, $78.9\%$), suggesting that the key issue is reward balance and executability, not merely whether intermediate reward is present---echoing \citet{gao2024designing}'s finding that process rewards can hurt RL training even when they seem informative.
+Note that v2c reports $14.4\%$ here under 30-task evaluation; the expanded 900-task evaluation in Section~\ref{sec:head2head} yields a tighter estimate of $11.0\% \pm 1.0\%$---the difference reflects the higher variance of the smaller eval set, not a discrepancy.
+
+\paragraph{Continuation Models Converge.}
+In contrast, continuation training from an outcome-dominant-trained checkpoint yields nearly identical results regardless of reward type: v4 (partial, continuation) achieves $82.2\% \pm 1.6\%$, comparable to v2a (outcome-dominant, from scratch) at $78.9\% \pm 3.1\%$.
+The prior knowledge learned from outcome-dominant training---specifically, the behavior of attempting all required steps---persists through continuation training with partial reward, consistent with findings that strong initialization can stabilize RL fine-tuning against reward exploitation \citep{toolrl2025}.
+
+\paragraph{RLVR Outperforms SFT.}
+Even the format-only GRPO baseline (v1, 63\%) outperforms supervised fine-tuning (v3a, 46\%), confirming the RLVR advantage for agent tasks with minimal reward engineering---paralleling the reasoning-domain finding that RLVR can match or exceed supervised approaches \citep{deepseek2025r1,wen2025rlvr}.
+
+\subsection{The Critical Comparison: v2a vs. v2c}
+\label{sec:head2head}
+
+To validate the core comparison with higher statistical resolution, we conduct an expanded evaluation with 100 tasks per difficulty level (300 total per seed, 3 seeds = 900 tasks per model).
+Table~\ref{tab:head2head} presents the results.
+
+\paragraph{Important caveat.}
+The v2a vs. v2c comparison simultaneously changes two variables: (1)~reward \emph{verification}---v2a's partial-on-failure component checks API state, while v2c grants credit based on format compliance alone; and (2)~reward \emph{structure}---outcome-dominant vs. stepwise.
+Consequently, we cannot attribute the performance gap to reward granularity alone.
+Our result is best understood as a negative finding about \emph{naive unverified stepwise} partial reward, not as evidence that all forms of dense or intermediate reward are harmful.
+Structured, verified dense rewards \citep{cm2_2025,admire2025,chen2026milestones} may well avoid this failure mode.
+
+\begin{table}[t]
+\centering
+\caption{Head-to-head: outcome-dominant (v2a) vs. naive partial (v2c), both trained from scratch. Expanded evaluation: 100 tasks per difficulty $\times$ 3 seeds = 900 tasks per model.}
+\label{tab:head2head}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Metric} & \textbf{v2a (outcome-dom.)} & \textbf{v2c (naive partial)} & \textbf{Gap} \\
+\midrule
+Overall success & $73.6{\pm}1.0\%$ & $11.0{\pm}1.0\%$ & $6.7\times$ \\
+D1 success & $90.0{\pm}0.8\%$ & $33.0{\pm}2.9\%$ & $2.7\times$ \\
+D2 success & $99.3{\pm}0.5\%$ & $0.0{\pm}0.0\%$ & $\infty$ \\
+D3 success & $31.3{\pm}4.1\%$ & $0.0{\pm}0.0\%$ & $\infty$ \\
+D3 steps completed & $3.47{\pm}0.03$ & $1.06{\pm}0.01$ & $3.3\times$ \\
+Early stop rate (all) & $12.2{\pm}1.1\%$ & $89.0{\pm}1.0\%$ & $7.3\times$ \\
+D3 Type~B rate & $36.7{\pm}3.4\%$ & $100.0{\pm}0.0\%$ & $2.7\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:expanded} strengthens the main finding under expanded evaluation. The gap between v2a and v2c widens from $5.5\times$ (30-task eval) to $6.7\times$ (300-task eval), while standard deviations shrink 3--5$\times$.
+Crucially, the gap is not confined to the hardest tasks: v2c also collapses on D2, where it achieves $0.0\%$ success compared with $99.3\%$ for v2a.
+This suggests that the failure is triggered not merely by task difficulty, but by sequential dependency structure itself: once tasks require ordered completion of interdependent API operations, naive partial credit becomes highly unstable during training from scratch \citep{cm2_2025}.
+The partial-reward model completes an average of 1.06 steps on D3 tasks requiring 4--5 steps and achieves $100.0\%$ D3 Type~B rate with $\sigma = 0.0\%$ across all three seeds, ruling out sampling variance. This is consistent with reward hacking: the learned policy exploits the format-based partial credit signal rather than attempting full task completion \citep{skalse2022misspecification,casper2023rewardhacking}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{fig2_expanded.pdf}
+\caption{Expanded evaluation comparing the outcome-dominant variant (v2a) with naive stepwise partial reward (v2c). 100 tasks per difficulty $\times$ 3 seeds = 900 tasks per model. The collapse of v2c extends beyond the hardest tasks and appears whenever ordered completion of dependent API operations is required.}
+\label{fig:expanded}
+\end{figure}
+
+\subsection{Outcome-Dominant Reward Eliminates Early Stopping}
+
+Variant v2b (outcome-dominant + Boltzmann curriculum) provides additional evidence.
+Across all three seeds, v2b achieves \textbf{0\% Type~B (early stop) failures}---on any difficulty level.
+All 21 D3 failures are Type~A (high partial, 86\%) or multi-entity management errors (14\%).
+The model always \emph{attempts} every required step; it sometimes fails final verification due to parameter errors, but never stops early.
+
+This directly contrasts with v2c's 100\% Type~B rate: outcome-dominant reward produces an ``attempt everything'' policy, while naive partial reward produces a ``harvest partial credit'' policy---consistent with \citet{sullivan2025grpoprm}'s argument that GRPO's implicit process reward mechanism may be sufficient for credit assignment without explicit step-level signals.
+
+% ============================================================
+\section{Analysis: Reward Hacking Mechanism}
+\label{sec:analysis}
+
+\subsection{Multi-Seed Failure Taxonomy}
+
+Table~\ref{tab:taxonomy} presents the aggregated D3 failure taxonomy across all seeds.
+
+\begin{table}[t]
+\centering
+\caption{D3 failure taxonomy aggregated across 3 seeds. Total D3 tasks = 30 per model (10 tasks $\times$ 3 seeds). ``Other'' for v5 = semantic failure (syntactically valid actions, 0 verified steps).}
+\label{tab:taxonomy}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Model} & \textbf{D3 Fails} & \textbf{Type~A} & \textbf{Type~B} & \textbf{Other} \\
+\midrule
+v2a (outcome-dom., scratch) & 16 & 8 (50\%) & 8 (50\%) & 0 \\
+v2b (outcome-dom., cont.) & 21 & 18 (86\%) & \textbf{0 (0\%)} & 3 (14\%) \\
+v2c (naive partial, scratch) & \textbf{30} & 0 (0\%) & \textbf{30 (100\%)} & 0 \\
+v5 (milestone hyb., scratch) & \textbf{30} & 0 (0\%) & 10 (33\%) & \textbf{20 (67\%)} \\
+v4 (partial, cont.) & 16 & 8 (50\%) & 8 (50\%) & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:taxonomy} visualizes the taxonomy and reveals that the difference is not only in success rate, but in \emph{failure regime}---reward design changes the shape of the learned policy, not just its final accuracy. Three patterns emerge:
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{fig3_taxonomy.pdf}
+\caption{D3 failure taxonomy by model. Reward design changes not only success rate but also failure regime: v2c collapses entirely to Type~B early stopping, v2b eliminates Type~B failures, v2a/v4 show a balanced Type~A/B split, and v5 exhibits a distinct pathology dominated by semantic failure (syntactically valid actions that fail API verification, yielding 0 verified steps). 30 D3 tasks = 10 $\times$ 3 seeds.}
+\label{fig:taxonomy}
+\end{figure}
+
+\paragraph{v2c: Pure Reward Hacking.}
+All 30 D3 evaluations (10 tasks $\times$ 3 seeds) fail, and every single failure is Type~B (early stop).
+The model learns a stereotyped policy: execute one action and stop, exploiting the format-based partial credit signal \citep{skalse2022misspecification}, analogous to the length-exploitation phenomenon documented in RLHF settings \citep{singhal2023rewardhacking}.
+With D3 tasks requiring 4--5 steps, the average completion is 1.07 steps---the model barely begins the task before stopping.
+This is not variance or bad luck; the standard deviation across seeds is 0.0\%.
+
+\paragraph{v2b: Zero Early Stopping.}
+Binary reward with curriculum produces 0\% Type~B failures across all seeds.
+All failures are Type~A (the model attempts all steps but makes errors) or multi-entity tracking failures.
+Outcome-dominant reward trains the model to \emph{always attempt completion}, even at the cost of sometimes failing verification \citep{deepseek2025r1}.
+
+\paragraph{v5: A Different Pathology.}
+V5 also fails all 30 D3 tasks, but its failure distribution differs sharply from v2c: 67\% are semantic failures (the model generates syntactically well-formed actions whose API calls consistently fail verification, yielding 0 verified steps) and only 33\% are Type~B early stops.
+Where v2c learns to \emph{stop trying}, v5 learns to \emph{try incorrectly}---optimizing surface-form validity without acquiring grounded API semantics \citep{mogrpo2025,fontana2025hidden}.
+
+\paragraph{v4 $\approx$ v2a: Strong Initialization.}
+Despite receiving partial reward during training, v4 exhibits the same failure distribution as v2a (50/50 Type~A/B split).
+The outcome-dominant-trained checkpoint's behavioral prior---``attempt all steps''---reduces sensitivity to the partial reward signal during continuation training.
+
+\subsection{Characteristic Stopping Patterns}
+
+The v2c model's early stopping is highly stereotyped:
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+  \item \texttt{full\_lifecycle\_refund} (5 steps): completes 1 step $\to$ partial $\approx 0.20$
+  \item \texttt{multi\_order} (4 steps): completes 1 step $\to$ partial $\approx 0.25$
+  \item \texttt{full\_delivery} (4 steps): completes 1 step $\to$ partial $\approx 0.25$
+\end{itemize}
+
+For comparison, the first v4 run (partial, from checkpoint) showed different stopping points:
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+  \item \texttt{full\_lifecycle\_refund} (5 steps): stops at 3 $\to$ partial $= 0.60$
+  \item \texttt{multi\_order} (4 steps): stops at 2 $\to$ partial $= 0.50$
+  \item \texttt{full\_delivery} (4 steps): stops at 3 $\to$ partial $= 0.75$
+\end{itemize}
+
+The from-scratch model (v2c) stops earlier because it never learned multi-step execution.
+The continuation model (first v4 run) stops later---it inherited some capability from outcome-dominant training---but still converges to a partial-credit optimum rather than attempting full completion, illustrating how partial reward can gradually erode learned behaviors even from a strong starting point \citep{gao2024designing}.
+
+\subsection{Connection to Theory}
+
+Our empirical findings align with several theoretical results:
+
+\paragraph{GRPO as Implicit PRM \citep{sullivan2025grpoprm}.}
+If GRPO already functions as an implicit process reward model, then adding explicit step-level rewards creates double-counting.
+This explains why v2a (outcome-dominant) outperforms v2c (naive stepwise partial): the explicit per-step signal \emph{interferes} with GRPO's internal credit assignment.
+
+\paragraph{MO-GRPO Reward Hacking \citep{mogrpo2025}.}
+When GRPO optimizes multiple reward components, it preferentially optimizes the highest-variance component.
+In our setup, the step partial reward has higher variance (0.0--1.0 in fine increments) than the binary reward (0 or 1), potentially causing the optimizer to focus on maximizing partial credit at the expense of binary success.
+
+\paragraph{Process Rewards Hurt RL \citep{gao2024designing}.}
+Our v2c results provide agent-domain evidence for \citeauthor{gao2024designing}'s finding that process-level rewards can harm RL training.
+Their observation of ``unnecessary step repetition'' maps to our Type~A failures, while our Type~B (early stop) represents a complementary failure mode specific to sequential tasks where stopping early is a viable reward-harvesting strategy.
+
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{A Non-Monotonic Tradeoff}
+
+Our results suggest a non-monotonic tradeoff in reward design for sequential API RLVR \citep{gao2024designing,toolrl2025}: too much unverified intermediate credit (v2c) encourages early-stop collapse, while too little executable intermediate signal (v5) starves learning.
+The outcome-dominant hybrid in v2a occupies a more favorable balance point.
+The underlying mechanism is straightforward: without prior knowledge of task completion, naive partial reward provides a shortcut---collect credit for early steps and stop---whereas outcome-dominant reward forces the model to discover complete action sequences.
+Once task-completion behavior is established (as in the continuation variants), the checkpoint's behavioral prior reduces sensitivity to reward type.
+
+\subsection{Practical Implications}
+
+For practitioners building RLVR training pipelines for agent tasks, we highlight several recommendations.
+\textbf{Make final completion the dominant reward signal} \citep{gao2024designing}: outcome-dominant verification is simpler to implement, harder to hack, and produces better agents in our setting---even when it includes partial credit on failure.
+\textbf{If using partial rewards, pre-train with outcome-dominant reward first}: our finding that strong initialization mitigates reward hacking suggests a two-phase strategy---establish task-completion behavior with outcome-dominant reward, then optionally fine-tune with richer signals. \textbf{Monitor Type~B failure rates during training} \citep{casper2023rewardhacking}: a rising early-stop rate is a leading indicator of reward hacking; if the model starts completing fewer steps over time, the reward signal is being exploited.
+Finally, \textbf{GRPO's implicit PRM may be sufficient} \citep{sullivan2025grpoprm}: explicit step-level credit assignment can interfere with GRPO's internal mechanism, and our results suggest trusting the algorithm to assign credit from outcome signals.
+
+\subsection{Limitations}
+
+Our study has several limitations that qualify the generality of our findings.
+All experiments use a single base model (Qwen2.5-0.5B-Instruct \citep{qwen2025qwen25}); larger models may exhibit different reward hacking dynamics \citep{deepseek2025r1}.
+Our gym covers a single domain (order management workflows), and other API domains such as customer service or database operations may have different properties.
+Training uses 100 tasks/epoch $\times$ 3 epochs with 4 generations---substantially smaller than production RLVR systems \citep{deepseek2025r1,agentrl2025}---and the effects may attenuate or amplify at scale.
+Batch size 1 with gradient accumulation limits the effective batch diversity seen by GRPO, potentially exacerbating reward hacking.
+We only test outcome-dominant $\to$ partial continuation; the reverse direction could test whether outcome-dominant reward can \emph{recover} a hacked policy.
+Finally, v2a's outcome-dominant reward is not pure binary---it returns partial credit on failure---so our comparison is between outcome-dominant hybrid and naive stepwise partial, not between pure binary and graded partial.
+
+\subsection{Exploratory: Structured Verifiable Milestone Reward (v5)}
+\label{sec:v5}
+
+Our main findings raise a natural question: is naive stepwise partial credit \emph{inherently} harmful, or is the problem its lack of structure and verification? Recent work on adaptive milestone rewards \citep{admire2025} and checklist-style credit assignment \citep{cm2_2025} suggests that structured dense reward can succeed where naive reward fails.
+To investigate, we train a variant (v5) with a \emph{verifiable milestone hybrid} reward:
+\begin{equation}
+r_{\text{v5}} = 0.7 \cdot r_{\text{binary}} + 0.3 \cdot \frac{m}{M}
+\end{equation}
+where $r_{\text{binary}} = 1.0$ on success and $0.0$ on failure, $m$ is the number of verified milestones, and $M$ is the total milestones. Milestones are counted only when the API confirms a correct state transition (sequential gating: the verifier stops at the first error).
+This design differs from v2c in three ways: (1)~milestones require API verification, not just format matching; (2)~the binary component dominates (0.7 vs. 0.3); (3)~the gap between ``almost done'' and ``done'' is $0.76$ (vs. $\sim$0.20 in v2a), making partial-credit harvesting far less attractive.
+
+Surprisingly, v5 achieves $0.0\% \pm 0.0\%$ overall across all three seeds---worse than even v2c ($11.0\%$)---with identical failure patterns on every seed: 67\% parameter errors (the model generates syntactically well-formed actions whose API calls consistently fail verification, yielding 0 steps completed) and 33\% early stopping (D3 tasks: 100\% Type~B).
+Importantly, the failure mode differs from v2c: rather than collapsing purely to early stopping, v5 produces actions in correct format that are semantically incorrect, suggesting the model optimizes syntactic validity without acquiring grounded API execution.
+
+Thus, v5 should be interpreted as an exploratory negative result: structured intermediate reward, in this simple form, did not resolve reward hacking and instead shifted the policy into a different pathological regime.
+Under our implementation, v5's reward functions include both a format reward and the milestone hybrid, optimized jointly.
+One plausible interpretation is that executable credit remained too sparse relative to the easier surface-form reward, causing the model to optimize syntactic validity without learning grounded API execution---consistent with findings that GRPO preferentially optimizes the highest-variance reward component \citep{mogrpo2025,fontana2025hidden}.
+Together with v2a ($73.6\%$) and v2c ($11.0\%$), the v5 result ($0.0\%$) reinforces the non-monotonic tradeoff discussed in Section~\ref{sec:discussion}.
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented an empirical study of reward design for GRPO training of sequential API agents on a consumer laptop GPU.
+Our results show that naive unverified stepwise partial reward induces early-stop collapse ($6.7\times$ performance gap vs. outcome-dominant reward), that strong initialization mitigates this vulnerability, and that a simple verified milestone hybrid does not resolve it.
+Together, these findings point to a non-monotonic tradeoff between reward density and training stability in our setting.
+
+Our findings do not imply that all dense rewards are harmful---structured approaches such as checklist rewards \citep{cm2_2025} and adaptive milestones \citep{admire2025} may avoid this failure mode.
+The central challenge is whether intermediate reward is verifiable, aligned with final completion, and balanced against terminal success.
+These results are consistent with theoretical analyses of process reward interference in GRPO \citep{sullivan2025grpoprm,gao2024designing,mogrpo2025} and with recent findings on reward hacking generalization \citep{macdiarmid2025misalignment,taylor2025school} and process reward exploitability \citep{khalifa2026countdown,tiwari2026prm}.
+Whether the early-stop collapse we observe generalizes to other agent domains remains an open question.
+The emerging divergence between dense-reward advocates \citep{seta2026,zhu2025planner} and binary-reward results \citep{gandhi2026endless,wei2025webagent} suggests that task structure---specifically, whether intermediate steps are independently verifiable or sequentially dependent---may be the key moderating variable, a direction we leave for future work.
+
+
+% ============================================================
+% BIBLIOGRAPHY
+% ============================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{30}
+
+\bibitem[{Cui et al.(2025)}]{cui2025prime}
+Cui, G., et al.
+\newblock Process Reinforcement through Implicit Rewards.
+\newblock \emph{arXiv:2502.01456}, 2025.
+
+\bibitem[{DeepSeek(2025)}]{deepseek2025r1}
+DeepSeek.
+\newblock DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning.
+\newblock \emph{arXiv:2501.12948}, 2025.
+
+\bibitem[{Fontana(2025)}]{fontana2025hidden}
+Fontana, S.
+\newblock Hidden Objective Biases in GRPO.
+\newblock \emph{arXiv:2601.05002}, 2025.
+
+\bibitem[{Gao et al.(2024)}]{gao2024designing}
+Gao, Z., et al.
+\newblock On Designing Effective RL Reward at Training Time for LLM Reasoning.
+\newblock \emph{arXiv:2410.15115}, 2024.
+
+\bibitem[{Lightman et al.(2023)}]{lightman2023lets}
+Lightman, H., et al.
+\newblock Let's Verify Step by Step.
+\newblock \emph{arXiv:2305.20050}, 2023.
+
+
+\bibitem[{Li et al.(2025a)}]{mogrpo2025}
+Li, Y., et al.
+\newblock Multi-Objective GRPO: Reward Hacking in Group Relative Policy Optimization.
+\newblock \emph{arXiv:2509.22047}, 2025.
+
+\bibitem[{Mroueh(2025)}]{mroueh2025grpo}
+Mroueh, Y.
+\newblock Reinforcement Learning with Verifiable Rewards: GRPO's Effective Loss, Dynamics, and Success Amplification.
+\newblock \emph{arXiv:2503.06639}, 2025.
+
+\bibitem[{Qi et al.(2024)}]{qi2024webrl}
+Qi, P., et al.
+\newblock WebRL: Training LLM Web Agents via Self-Evolving Online Curriculum Reinforcement Learning.
+\newblock \emph{arXiv:2411.02337}, 2024.
+
+\bibitem[{Qwen(2025)}]{qwen2025qwen25}
+Qwen Team.
+\newblock Qwen2.5 Technical Report.
+\newblock 2025.
+
+\bibitem[{Sullivan(2025)}]{sullivan2025grpoprm}
+Sullivan, C.
+\newblock GRPO is Secretly a Process Reward Model.
+\newblock \emph{arXiv:2509.21154}, 2025.
+
+\bibitem[{Qian et al.(2025)}]{toolrl2025}
+Qian, C., et al.
+\newblock ToolRL: Reward is All Tool Learning Needs.
+\newblock \emph{arXiv:2504.13958}, 2025.
+
+\bibitem[{TRL(2024)}]{trl2024}
+TRL.
+\newblock TRL: Transformer Reinforcement Learning.
+\newblock \url{https://github.com/huggingface/trl}, 2024.
+
+\bibitem[{Ouyang et al.(2025)}]{ultralogic2025}
+Ouyang, S., et al.
+\newblock UltraLogic: Advancing Logical Reasoning with Bipolar Graded Rewards.
+\newblock \emph{arXiv:2601.03205}, 2025.
+
+\bibitem[{Uesato et al.(2022)}]{uesato2022solving}
+Uesato, J., et al.
+\newblock Solving Math Word Problems with Process- and Outcome-Based Feedback.
+\newblock \emph{arXiv:2211.14275}, 2022.
+
+\bibitem[{Wen et al.(2025)}]{wen2025rlvr}
+Wen, Y., et al.
+\newblock RLVR Incentivizes Correct Reasoning in LLMs.
+\newblock \emph{arXiv:2506.14245}, 2025.
+
+\bibitem[{Yao et al.(2024)}]{yao2024taubench}
+Yao, S., et al.
+\newblock $\tau$-bench: A Benchmark for Tool-Agent-User Interaction.
+\newblock \emph{arXiv:2406.12045}, 2024.
+
+\bibitem[{Yue et al.(2025)}]{yue2025rlvr}
+Yue, X., et al.
+\newblock Does RLVR Truly Improve LLM Reasoning?
+\newblock \emph{arXiv:2504.13837}, 2025.
+
+\bibitem[{Zeng et al.(2025)}]{zeng2025turnlevel}
+Zeng, W., et al.
+\newblock Turn-Level Reward Design for Multi-Turn Reinforcement Learning.
+\newblock \emph{arXiv:2505.11821}, 2025.
+
+\bibitem[{Yuan et al.(2025)}]{agentr1}
+Yuan, H., et al.
+\newblock Agent-R1: Training Powerful LLM Agents with End-to-End Reinforcement Learning.
+\newblock \emph{arXiv:2511.14460}, 2025.
+
+\bibitem[{Abdulhai et al.(2025)}]{agentrl2025}
+Abdulhai, M., et al.
+\newblock AgentRL: Scaling Agentic Reinforcement Learning with a Multi-Turn, Multi-Task Framework.
+\newblock \emph{arXiv:2510.04206}, 2025.
+
+\bibitem[{Wang et al.(2026)}]{cm2_2025}
+Wang, Y., et al.
+\newblock CM2: Reinforcement Learning with Checklist Rewards for Multi-Turn and Multi-Step Agentic Tool Use.
+\newblock \emph{arXiv:2602.12268}, 2026.
+
+\bibitem[{Song et al.(2025)}]{li2025seta}
+Song, Y., et al.
+\newblock Agent-RLVR: Training Software Engineering Agents via Guidance and Environment Rewards.
+\newblock \emph{arXiv:2506.11425}, 2025.
+
+\bibitem[{Chen et al.(2026)}]{zhang2025longrlvr}
+Chen, G., Shieh, M.Q., and Bing, L.
+\newblock LongRLVR: Long-Context Reinforcement Learning Requires Verifiable Context Rewards.
+\newblock \emph{arXiv:2603.02146}, 2026.
+
+\bibitem[{Zhou et al.(2026)}]{admire2025}
+Zhou, J., et al.
+\newblock ADMIRE: Adaptive Milestone Reward for GUI Agents.
+\newblock \emph{arXiv:2602.11524}, 2026.
+
+\bibitem[{Xia et al.(2026)}]{searchp1}
+Xia, T., et al.
+\newblock Search-P1: Path-Centric Reward Shaping for Stable and Efficient Agentic RAG Training.
+\newblock \emph{arXiv:2602.22576}, 2026.
+
+\bibitem[{Schulman et al.(2017)}]{schulman2017ppo}
+Schulman, J., Wolski, F., Dhariwal, P., Radford, A., and Klimov, O.
+\newblock Proximal Policy Optimization Algorithms.
+\newblock \emph{arXiv:1707.06347}, 2017.
+
+\bibitem[{Casper et al.(2023)}]{casper2023rewardhacking}
+Casper, S., et al.
+\newblock Open Problems and Fundamental Limitations of Reinforcement Learning from Human Feedback.
+\newblock \emph{arXiv:2307.15217}, 2023.
+
+\bibitem[{Skalse et al.(2022)}]{skalse2022misspecification}
+Skalse, J., Howe, N.H.R., Krasheninnikov, D., and Krueger, D.
+\newblock Defining and Characterizing Reward Hacking.
+\newblock \emph{NeurIPS}, 2022.
+
+\bibitem[{Cobbe et al.(2021)}]{cobbe2021gsm8k}
+Cobbe, K., et al.
+\newblock Training Verifiers to Solve Math Word Problems.
+\newblock \emph{arXiv:2110.14168}, 2021.
+
+\bibitem[{Shao et al.(2024)}]{shao2024deepseekmath}
+Shao, Z., et al.
+\newblock DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models.
+\newblock \emph{arXiv:2402.03300}, 2024.
+
+\bibitem[{Singhal et al.(2023)}]{singhal2023rewardhacking}
+Singhal, P., et al.
+\newblock A Long Way to Go: Investigating Length Correlations in RLHF.
+\newblock \emph{arXiv:2310.03716}, 2023.
+
+\bibitem[{Wang et al.(2024)}]{wang2024mathshepherd}
+Wang, P., et al.
+\newblock Math-Shepherd: Verify and Reinforce LLMs Step-by-step without Human Annotations.
+\newblock \emph{ACL}, 2024.
+
+\bibitem[{Hendrycks et al.(2021)}]{hendrycks2021math}
+Hendrycks, D., et al.
+\newblock Measuring Mathematical Problem Solving With the MATH Dataset.
+\newblock \emph{NeurIPS}, 2021.
+
+\bibitem[{Huang et al.(2026)}]{huang2026dynamics}
+Huang, Y., Wen, Z., Chi, Y., Wei, Y., Singh, A., Liang, Y., and Chen, Y.
+\newblock On the Learning Dynamics of RLVR at the Edge of Competence.
+\newblock \emph{arXiv:2602.14872}, 2026.
+
+\bibitem[{Liu et al.(2025b)}]{liu2025drgrpo}
+Liu, Z., Chen, C., Li, W., Qi, P., Pang, T., Du, C., Lee, W.S., and Lin, M.
+\newblock Understanding R1-Zero-Like Training: A Critical Perspective.
+\newblock \emph{arXiv:2503.20783}, 2025.
+
+\bibitem[{Yu et al.(2025)}]{yu2025dapo}
+Yu, Q., Zhang, Z., Zhu, R., Yuan, Y., et al.
+\newblock DAPO: An Open-Source LLM Reinforcement Learning System at Scale.
+\newblock \emph{arXiv:2503.14476}, 2025.
+
+\bibitem[{Pan et al.(2026)}]{pan2026survey}
+Pan, P.-C., Liang, Y., and Lin, S.
+\newblock Reward Modeling for Reinforcement Learning-Based LLM Reasoning: Design, Challenges, and Evaluation.
+\newblock \emph{arXiv:2602.09305}, 2026.
+
+\bibitem[{Chen et al.(2026b)}]{chen2026milestones}
+Chen, J., Fu, D., Xu, S., Chen, J., Feng, Y., Yang, Y., Yan, J., Zha, H., and Xia, R.
+\newblock Milestones over Outcome: Unlocking Geometric Reasoning with Sub-Goal Verifiable Reward.
+\newblock \emph{arXiv:2601.05073}, 2026.
+
+\bibitem[{Shen et al.(2026)}]{seta2026}
+Shen, Q., Rainton, J., Aliev, A., Awelkair, A., Ma, B., Huang, Z., Mao, Y., Fan, W., Torr, P., Ghanem, B., Hu, C., Thakker, U., and Li, G.
+\newblock SETA: Scaling Environments for Terminal Agents.
+\newblock \emph{CAMEL-AI Technical Report}, 2026.
+
+\bibitem[{Gandhi et al.(2026)}]{gandhi2026endless}
+Gandhi, K., Garg, S., Goodman, N.D., and Papailiopoulos, D.
+\newblock Endless Terminals.
+\newblock \emph{arXiv:2601.16443}, 2026.
+
+\bibitem[{Wei et al.(2025)}]{wei2025webagent}
+Wei, Z., Yao, W., Liu, Y., Zhang, W., Lu, Q., Qiu, L., Yu, C., Xu, P., Zhang, C., Yin, B., Yun, H., and Li, L.
+\newblock WebAgent-R1: Training Web Agents via End-to-End Multi-Turn Reinforcement Learning.
+\newblock \emph{arXiv:2505.16421}, 2025.
+
+\bibitem[{Zhu et al.(2025)}]{zhu2025planner}
+Zhu, S., Jiang, Y., Sang, H., Tang, S., Song, Q., He, B., Jain, R., Wang, Z., and Geramifard, A.
+\newblock Planner-R1: Reward Shaping Enables Efficient Agentic RL with Smaller LLMs.
+\newblock \emph{arXiv:2509.25779}, 2025.
+
+\bibitem[{Su et al.(2025)}]{su2025prs}
+Su, J., Zeng, X., Liu, L., Luo, C., Chen, Y., and Zhuang, Z.
+\newblock Enhancing Agentic RL with Progressive Reward Shaping and Value-based Sampling Policy Optimization.
+\newblock \emph{arXiv:2512.07478}, 2025.
+
+\bibitem[{Liu et al.(2025c)}]{liu2025istar}
+Liu, X., Wang, K., Wu, Y., Huang, F., Li, Y., Zhang, J., and Jiao, J.
+\newblock Agentic Reinforcement Learning with Implicit Step Rewards.
+\newblock \emph{arXiv:2509.19199}, 2025.
+
+\bibitem[{MacDiarmid et al.(2025)}]{macdiarmid2025misalignment}
+MacDiarmid, M., Wright, B., Uesato, J., Benton, J., et al.
+\newblock Natural Emergent Misalignment from Reward Hacking in Production RL.
+\newblock \emph{arXiv:2511.18397}, 2025.
+
+\bibitem[{Taylor et al.(2025)}]{taylor2025school}
+Taylor, M., Chua, J., Betley, J., Treutlein, J., and Evans, O.
+\newblock School of Reward Hacks: Hacking Harmless Tasks Generalizes to Misaligned Behavior in LLMs.
+\newblock \emph{arXiv:2508.17511}, 2025.
+
+\bibitem[{Khalifa et al.(2026)}]{khalifa2026countdown}
+Khalifa, M., Khan, Z., Tafveez, O., Peng, H., and Wang, L.
+\newblock Countdown-Code: A Testbed for Studying The Emergence and Generalization of Reward Hacking in RLVR.
+\newblock \emph{arXiv:2603.07084}, 2026.
+
+\bibitem[{Tiwari et al.(2026)}]{tiwari2026prm}
+Tiwari, R., Tomar, A., Bamba, U., Maheswaran, M., Yang, H., Mahoney, M.W., Keutzer, K., and Gholami, A.
+\newblock Reward Under Attack: Analyzing the Robustness and Hackability of Process Reward Models.
+\newblock \emph{arXiv:2603.06621}, 2026.
+
+\end{thebibliography}
+
+
+% ============================================================
+\appendix
+\section{Training Dynamics from First V4 Run}
+\label{app:dynamics}
+
+The following data comes from the first v4 training run, which contained a checkpoint evaluation bug (subsequently fixed). We include it as \textbf{exploratory, anecdotal evidence only}: the patterns are suggestive but cannot be considered rigorous because they derive from a single buggy run. The fixed v4 run converged to v2a-level performance, and we did not reproduce these specific dynamics under the corrected setup.
+
+\subsection{D3 Epoch Curve}
+
+\begin{table}[h]
+\centering
+\caption{D3 average partial progress by training epoch (first v4 run, pre-fix).}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Model} & \textbf{Epoch 2} & \textbf{Epoch 3} \\
+\midrule
+v2b (outcome-dominant) & 0.810 & 0.850 ($+$0.040) \\
+v4 (partial, first run) & 0.620 & 0.530 ($-$0.090) \\
+\midrule
+Gap & $+$0.190 & $+$0.320 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Hard-Task Reward Distribution}
+
+\begin{table}[h]
+\centering
+\caption{Hard-task outcome patterns during first v4 training run.}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Pattern} & \textbf{Epoch 2} & \textbf{Epoch 3} & \textbf{Trend} \\
+\midrule
+Full success & 4 & 5 & stable \\
+Type~A (harvest partial) & 1 & 9 & 9$\times$ increase \\
+Type~B (early stop) & 9 & 8 & stable high \\
+Near-miss (attempts all) & 7 & 1 & 7$\times$ collapse \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Under partial reward, the proportion of ``harvest partial credit'' behaviors increases 9$\times$ between epochs while ``attempt full completion'' collapses 7$\times$. This pattern is consistent with reward hacking, but we stress that this data is \textbf{anecdotal}: it comes from a single buggy training run and was not reproduced under the corrected setup. We include it solely as an illustrative example of the kind of dynamics that \emph{could} underlie early-stop collapse, not as a validated finding.
+
+\end{document}

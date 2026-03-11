@@ -1,84 +1,92 @@
-# RLVR Training Gym
+# Naive Stepwise Partial Rewards Induce Early-Stop Collapse in GRPO Training of Sequential API Agents
 
-A mock enterprise API environment for training LLM agents with **Reinforcement Learning from Verifiable Rewards (RLVR)**.
+This repository contains the code, training scripts, evaluation harness, and figures for the paper.
 
-Built as a functional training substrate: a state-machine-verified order management API, Boltzmann adaptive curriculum, and GRPO training loop. The environment generates tasks of varying difficulty, the agent produces API call sequences, and a verifier checks correctness against ground truth — no human judge required.
+## Key Finding
 
-## Results
+Training a 0.5B LLM agent with GRPO on a deterministic API workflow gym, we compare outcome-dominant (binary) rewards against naive stepwise partial rewards. The partial reward variant (v2c) scores 14% overall vs. 79% for binary (v2a), a 5.5x gap that widens to 6.7x on 900 expanded tasks. The root cause is **early-stop collapse**: the agent learns to execute one correct step and stop, collecting partial credit without attempting harder subsequent actions. On D3 (hard) tasks, v2c exhibits 100% Type B (early stop) failure across all seeds.
 
-Trained Qwen2.5-1.5B with GRPO across 6 configurations:
-
-| Variant | Reward Design | Easy | Medium | Hard | **Total** |
-|---------|--------------|------|--------|------|-----------|
-| v1 (baseline) | format only | 10/10 | 9/10 | 0/10 | 19/30 = 63% |
-| **v2a** | **format + binary accuracy** | **9/10** | **10/10** | **7/10** | **26/30 = 86%** |
-| v2b | v2a + Boltzmann curriculum | 10/10 | 9/10 | 0/10 | 19/30 = 63% |
-| v2c | format + step-by-step partial | 8/10 | 0/10 | 0/10 | 8/30 = 26% |
-| v3a (SFT) | supervised fine-tuning | 10/10 | 4/10 | 0/10 | 14/30 = 46% |
-| v4 | format + stepwise execution | 8/10 | 3/10 | 0/10 | 11/30 = 36% |
-
-**Key finding:** Binary verifiable rewards (v2a, 86%) dramatically outperform partial/step-based rewards (v2c, 26%). Partial credit creates reward hacking — the model learns to do step 1 and stop.
-
-## Architecture
+## Repository Structure
 
 ```
-Task Generator ──→ Agent (LLM) ──→ Verifier
-      │                                  │
-      │         Mock API Server          │
-      │         (FastAPI + State Machine) │
-      └──────────────────────────────────┘
-                    ↓
-              GRPO Reward Signal
+gym/            API training gym (order management system clone)
+  api_system.py       Simulated order management API with state machine
+  task_generator.py   Procedural task generator (infinite variations)
+  verifier.py         Deterministic binary verifier (RLVR core)
+  env.py              Multi-turn agent loop environment
+
+training/       GRPO training scripts for each variant
+  train_grpo.py       Base GRPO training loop
+  train_v2a.py        Outcome-dominant binary reward (79%)
+  train_v2c.py        Naive stepwise partial reward (14%)
+  train_v2b.py        Binary + curriculum (76%)
+  train_v3a_sft.py    SFT baseline (46%)
+  train_v4_combined.py  Partial reward continuation from v2b (82%)
+  train_v5.py         Milestone hybrid (0%)
+
+eval/           Evaluation harness
+  unified_eval.py     Unified eval with failure taxonomy
+  multi_seed_eval.sh  Multi-seed evaluation runner (3 seeds)
+  expanded_eval.sh    900-task expanded evaluation
+
+figures/        Paper figures (Nature/Cell palette)
+  make_figures.py     Figure generation script
+  fig1_overall.png    Training variant comparison (7 variants, 3 seeds)
+  fig2_expanded.png   v2a vs v2c by difficulty (900 tasks)
+  fig3_taxonomy.png   D3 failure taxonomy (Type A / Type B / Other)
+
+paper/
+  paper.tex           LaTeX source
 ```
 
-### Components
+## The Gym
 
-- **`api_system.py`** — FastAPI mock order management API with state machine (pending → paid → shipped → delivered, with cancel/refund branches)
-- **`task_generator.py`** — Generates tasks across 5 types and 3 difficulty levels, with Boltzmann adaptive curriculum
-- **`verifier.py`** — Verifies agent actions against expected sequences, handling dynamic IDs and state dependencies
-- **`env.py`** — Gymnasium-compatible environment wrapper for step-by-step execution
-- **`train_grpo.py`** — GRPO training loop with configurable reward functions
+The gym simulates an e-commerce order management API with a state machine (created, paid, shipped, delivered, refunded, cancelled). Tasks are procedurally generated with three difficulty levels based on the number of sequential API calls required.
 
-### Task Types
+The verifier checks each API call against the known correct sequence and provides binary (pass/fail) or partial (steps_completed / steps_total) rewards. No learned reward model is needed since correctness is fully determined by the API state machine.
 
-| Difficulty | Task Types |
-|-----------|-----------|
-| Easy (d=1) | `create_order`, `create_and_check`, `create_and_cancel` |
-| Medium (d=2) | `create_and_pay`, `create_pay_ship` |
-| Hard (d=3) | `full_delivery`, `full_lifecycle_with_refund` |
+## Training Variants
 
-### Reward Functions
+| Variant | Reward | Init | Overall | D3 Type B |
+|---------|--------|------|---------|-----------|
+| v2a | outcome-dominant binary | scratch | 79 +/- 3% | 27% |
+| v2c | naive stepwise partial | scratch | 14 +/- 3% | 100% |
+| v2b | binary + curriculum | scratch | 76 +/- 4% | 0% |
+| v4 | partial (cont. from v2b) | cont. | 82 +/- 2% | 27% |
+| v5 | milestone hybrid | scratch | 0% | 33% |
+| v1 | format-only binary | scratch | 63% | n/a |
+| v3a | SFT | scratch | 46% | n/a |
 
-1. **`format_reward`** — Checks output format (ACTION/BODY structure)
-2. **`accuracy_reward`** — Binary: 1.0 if all steps correct, 0.0 otherwise
-3. **`step_reward`** — Partial credit: steps_completed / steps_total (causes reward hacking!)
+## Reproducing
 
-## Quick Start
+1. Start the API gym
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Start the mock API
-uvicorn api_system:app --port 8000
-
-# Run tests
-python test_verifier.py
-
-# Train (requires GPU)
-python train_grpo.py
+cd gym && uvicorn api_system:app --port 8000
 ```
 
-## Blog Post
+2. Run training (requires GPU + transformers + trl)
 
-Full writeup with analysis: [Building a Zendesk Training Gym for LLM Agents](https://yaowu-portfolio.vercel.app/blog/building-zendesk-training-gym-llm-agents)
+```bash
+python training/train_v2a.py   # binary reward
+python training/train_v2c.py   # partial reward
+```
 
-## References
+3. Evaluate
 
-- DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via RL (arXiv:2501.12948)
-- WebRL: Training LLM Web Agents via Self-Evolving Online Curriculum RL (arXiv:2411.02337)
-- DAPO: An Open-Source LLM RL System at Scale (arXiv:2503.14476)
-- TinyV: Rethinking Verifier Design for Scalable RLVR (arXiv:2505.14625)
+```bash
+python eval/unified_eval.py --model /path/to/checkpoint --seed 42 --tasks-per-diff 10
+```
+
+4. Generate figures
+
+```bash
+python figures/make_figures.py
+```
+
+## Requirements
+
+Python 3.10+, PyTorch, transformers, trl, FastAPI, uvicorn, httpx, matplotlib, numpy
 
 ## License
 
